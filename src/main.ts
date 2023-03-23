@@ -1,14 +1,11 @@
 import { readFileSync } from "fs";
-import * as core from "@actions/core";
+import * as taskLib from "azure-pipelines-task-lib/task";
 import { Configuration, OpenAIApi } from "openai";
-import { Octokit } from "@octokit/rest";
 import parseDiff, { Chunk, File } from "parse-diff";
 import minimatch from "minimatch";
 
-const GITHUB_TOKEN: string = core.getInput("GITHUB_TOKEN");
-const OPENAI_API_KEY: string = core.getInput("OPENAI_API_KEY");
-
-const octokit = new Octokit({ auth: GITHUB_TOKEN });
+const AZURE_DEVOPS_TOKEN: string = taskLib.getInput("AZURE_DEVOPS_TOKEN", true);
+const OPENAI_API_KEY: string = taskLib.getInput("OPENAI_API_KEY", true);
 
 const configuration = new Configuration({
   apiKey: OPENAI_API_KEY,
@@ -16,46 +13,40 @@ const configuration = new Configuration({
 
 const openai = new OpenAIApi(configuration);
 
+const azureDevOpsApi = new AzureDevOpsApi(AZURE_DEVOPS_TOKEN);
+
 interface PRDetails {
-  owner: string;
-  repo: string;
-  pull_number: number;
+  projectId: string;
+  repositoryId: string;
+  pullRequestId: number;
   title: string;
   description: string;
 }
 
 async function getPRDetails(): Promise<PRDetails> {
-  const { repository, number } = JSON.parse(
-    readFileSync(process.env.GITHUB_EVENT_PATH || "", "utf8")
-  );
-  const prResponse = await octokit.pulls.get({
-    owner: repository.owner.login,
-    repo: repository.name,
-    pull_number: number,
-  });
+  const pr = await azureDevOpsApi.getPullRequest();
   return {
-    owner: repository.owner.login,
-    repo: repository.name,
-    pull_number: number,
-    title: prResponse.data.title ?? "",
-    description: prResponse.data.body ?? "",
+    projectId: pr.projectId,
+    repositoryId: pr.repositoryId,
+    pullRequestId: pr.pullRequestId,
+    title: pr.title,
+    description: pr.description,
   };
 }
 
 async function getDiff(
-  owner: string,
-  repo: string,
-  pull_number: number
+  projectId: string,
+  repositoryId: string,
+  pullRequestId: number
 ): Promise<string | null> {
-  const response = await octokit.pulls.get({
-    owner,
-    repo,
-    pull_number,
-    mediaType: { format: "diff" },
-  });
-  // @ts-expect-error - response.data is a string
-  return response.data;
+  const response = await azureDevOpsApi.getPullRequestDiff(
+    projectId,
+    repositoryId,
+    pullRequestId
+  );
+  return response;
 }
+
 
 async function analyzeCode(
   parsedDiff: File[],
@@ -166,9 +157,9 @@ async function createReviewComment(
 (async function main() {
   const prDetails = await getPRDetails();
   const diff = await getDiff(
-    prDetails.owner,
-    prDetails.repo,
-    prDetails.pull_number
+    prDetails.projectId,
+    prDetails.repositoryId,
+    prDetails.pullRequestId
   );
   if (!diff) {
     console.log("No diff found");
@@ -176,7 +167,7 @@ async function createReviewComment(
   }
 
   const parsedDiff = parseDiff(diff);
-  const excludePatterns = core
+  const excludePatterns = taskLib
     .getInput("exclude")
     .split(",")
     .map((s) => s.trim());
@@ -189,10 +180,10 @@ async function createReviewComment(
 
   const comments = await analyzeCode(filteredDiff, prDetails);
   if (comments.length > 0) {
-    await createReviewComment(
-      prDetails.owner,
-      prDetails.repo,
-      prDetails.pull_number,
+    await azureDevOpsApi.createReviewComment(
+      prDetails.projectId,
+      prDetails.repositoryId,
+      prDetails.pullRequestId,
       comments
     );
   }
